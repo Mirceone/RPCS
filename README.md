@@ -18,7 +18,7 @@ A lightweight background service running on the target PC. It listens for SSH-tr
 - Log executed commands (optional)
 
 #### 🚧 Development To-Do
-- [ ] Build initial Java-based command execution service
+- [x] Build initial Java-based command execution service
 - [ ] Add OS-specific command logic:
   - Windows: `shutdown`, `rundll32 powrprof.dll...`
   - Linux/macOS: `systemctl`, `shutdown`, `pmset`, etc.

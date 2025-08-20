@@ -26,17 +26,21 @@ public class Main {
             System.out.println("Shutting down daemon...");
         }));
 
-        // One-shot mode: `--cmd reboot|poweroff|suspend`
-        if (args.length == 2 && "--cmd".equals(args[0])) {
-            runAction(args[1]);
-            return;
+        // One-shot flags
+        if (args.length == 1) {
+            switch (args[0]) {
+                case "--suspend" -> { runAction("suspend"); return; }
+                case "--reboot"  -> { runAction("reboot");  return; }   // optional
+                case "--poweroff"-> { runAction("poweroff");return; }   // optional
+                default -> { /* fall through to interactive mode */ }
+            }
         }
 
         // Interactive loop
         printBanner();
         try (Scanner scanner = new Scanner(System.in)) {
             while (running) {
-                System.out.print("> ");
+                System.out.print("[rpcs-daemon] > ");
                 if (!scanner.hasNextLine()) break;
                 String line = scanner.nextLine().trim().toLowerCase(Locale.ROOT);
                 if (line.isEmpty()) continue;
@@ -45,6 +49,7 @@ public class Main {
                     case "reboot"   -> runAction("reboot");
                     case "poweroff" -> runAction("poweroff");
                     case "suspend"  -> runAction("suspend");
+                    case "test"  -> runAction("devTest");
                     case "help"     -> printHelp();
                     case "exit", "quit" -> {
                         running = false;
@@ -62,6 +67,7 @@ public class Main {
                 case "reboot"   -> CommandRunner.run("systemctl", "reboot");
                 case "poweroff" -> CommandRunner.run("systemctl", "poweroff");
                 case "suspend"  -> CommandRunner.run("systemctl", "suspend");
+                case "devTest"  -> CommandRunner.run("echo", "dev Test working ;)");
                 default -> {
                     System.out.println("Unknown action: " + action);
                     return;
@@ -90,7 +96,7 @@ public class Main {
                   help      - show this help
                   exit      - stop daemon
                 One-shot usage:
-                  java -jar rpcs-daemon-0.1.0.jar --cmd reboot
+                  java -jar rpcs-daemon-0.1.0.jar --suspend
                 """);
     }
 

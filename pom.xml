@@ -49,7 +49,7 @@
                     <programs>
                         <program>
                             <mainClass>com.mirceone.Main</mainClass>
-                            <name>rpcs</name>
+                            <id>rpcs</id>
                         </program>
                     </programs>
                     <assembleDirectory>target/app</assembleDirectory>

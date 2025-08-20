@@ -1,142 +1,163 @@
 package com.mirceone;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.util.Locale;
-import java.util.Scanner;
+import com.mirceone.core.CommandRegistry;
+import com.mirceone.core.Env;
+import com.mirceone.core.Config;
+import com.mirceone.core.Log;
+import com.mirceone.net.MagicServer;
+
+import java.util.*;
+
+import static com.mirceone.core.Log.*;
 
 public class Main {
-
     private static volatile boolean running = true;
+    private static volatile boolean showLogsAfterCommand = false; // toggle via `logmode on|off`
 
     public static void main(String[] args) {
-        // Basic env guardrails
-        if (!isLinux()) {
-            System.err.println("[WARN] Non-Linux OS detected. `systemctl` calls will likely fail.");
+        if (!Env.isLinux()) {
+            warn("Non-Linux OS detected. `systemctl` calls may fail.");
         }
-        if (!commandExists("systemctl")) {
-            System.err.println("[ERROR] `systemctl` not found in PATH. Aborting.");
+        if (!Env.commandExists("systemctl")) {
+            error("`systemctl` not found in PATH. Aborting.");
             System.exit(127);
         }
 
-        // Shutdown hook
+        CommandRegistry registry = new CommandRegistry();
+
+        // --- start UDP magic server if secret is configured ---
+        MagicServer server = null;
+        Thread serverThread = null;
+        String secret = Config.secret(); // warns in Config if missing
+        if (secret != null && !secret.isBlank()) {
+            server = new MagicServer(registry);
+            serverThread = new Thread(server, "rpcs-magic-udp");
+            serverThread.setDaemon(true);
+            serverThread.start();
+            info("MagicServer thread started.");
+        } else {
+            info("MagicServer not started (RPCS_SECRET missing).");
+        }
+
+        // --- shutdown handling ---
+        MagicServer finalServer = server;
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             running = false;
-            System.out.println("Shutting down daemon...");
+            if (finalServer != null) finalServer.shutdown();
+            info("Shutting down daemon...");
         }));
 
-        // One-shot flags
-        if (args.length == 1) {
-            switch (args[0]) {
-                case "--suspend" -> { runAction("suspend"); return; }
-                case "--reboot"  -> { runAction("reboot");  return; }   // optional
-                case "--poweroff"-> { runAction("poweroff");return; }   // optional
-                default -> { /* fall through to interactive mode */ }
+        // --- one-shot flags: --<command> [args...] (e.g., --suspend) ---
+        if (args.length >= 1 && args[0].startsWith("--")) {
+            String cmd = args[0].substring(2).toLowerCase(Locale.ROOT);
+            String[] rest = Arrays.copyOfRange(args, 1, args.length);
+            info("One-shot flag received: --" + cmd + " " + String.join(" ", rest));
+            boolean known = registry.runByName(cmd, rest);
+            if (!known) {
+                error("Unknown command flag: --" + cmd);
+                printUsageAndExit(registry, 1);
+            } else if (showLogsAfterCommand || "1".equals(System.getenv("RPCS_SHOW_LOGS"))) {
+                printTail(20);
             }
+            return;
         }
 
-        // Interactive loop
-        printBanner();
-        try (Scanner scanner = new Scanner(System.in)) {
+        // --- interactive REPL ---
+        printBanner(registry, server != null);
+        try (Scanner sc = new Scanner(System.in)) {
             while (running) {
                 System.out.print("[rpcs-daemon] > ");
-                if (!scanner.hasNextLine()) break;
-                String line = scanner.nextLine().trim().toLowerCase(Locale.ROOT);
+                if (!sc.hasNextLine()) break;
+                String line = sc.nextLine().trim();
                 if (line.isEmpty()) continue;
 
-                switch (line) {
-                    case "reboot"   -> runAction("reboot");
-                    case "poweroff" -> runAction("poweroff");
-                    case "suspend"  -> runAction("suspend");
-                    case "test"  -> runAction("devTest");
-                    case "help"     -> printHelp();
-                    case "exit", "quit" -> {
-                        running = false;
-                        System.out.println("Bye.");
+                String[] parts = line.split("\\s+");
+                String cmd = parts[0].toLowerCase(Locale.ROOT);
+                String[] rest = Arrays.copyOfRange(parts, 1, parts.length);
+
+                switch (cmd) {
+                    case "help" -> printBanner(registry, server != null);
+                    case "clear" -> clearScreen();
+                    case "logs" -> {
+                        int n = 50;
+                        if (rest.length == 1) {
+                            try { n = Integer.parseInt(rest[0]); } catch (NumberFormatException ignored) {}
+                        }
+                        printTail(n);
                     }
-                    default -> System.out.println("Unknown command. Type `help`.");
+                    case "logmode" -> {
+                        if (rest.length == 1) {
+                            showLogsAfterCommand = rest[0].equalsIgnoreCase("on");
+                            info("logmode: " + (showLogsAfterCommand ? "on" : "off"));
+                            System.out.println("logmode: " + (showLogsAfterCommand ? "on" : "off"));
+                        } else {
+                            System.out.println("Usage: logmode on|off");
+                        }
+                    }
+                    case "exit", "quit" -> { running = false; info("Bye."); System.out.println("Bye."); }
+                    default -> {
+                        info("Command: " + cmd + " " + String.join(" ", rest));
+                        boolean known = registry.runByName(cmd, rest);
+                        if (!known) {
+                            System.out.println("Unknown command. Type `help`.");
+                            warn("Unknown command: " + cmd);
+                        } else if (showLogsAfterCommand) {
+                            printTail(20);
+                        }
+                    }
                 }
             }
         }
     }
 
-    private static void runAction(String action) {
-        try {
-            switch (action) {
-                case "reboot"   -> CommandRunner.run("systemctl", "reboot");
-                case "poweroff" -> CommandRunner.run("systemctl", "poweroff");
-                case "suspend"  -> CommandRunner.run("systemctl", "suspend");
-                case "devTest"  -> CommandRunner.run("echo", "dev Test working ;)");
-                default -> {
-                    System.out.println("Unknown action: " + action);
-                    return;
-                }
-            }
-        } catch (IOException e) {
-            System.err.println("[ERROR] Failed to start command: " + e.getMessage());
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            System.err.println("[ERROR] Command interrupted.");
-        } catch (CommandFailedException e) {
-            System.err.println("[ERROR] " + e.getMessage());
-            if (e.exitCode == 1) {
-                System.err.println("Tip: This may require elevated privileges (sudo/polkit).");
-            }
-        }
-    }
-
-    private static void printBanner() {
+    private static void printBanner(CommandRegistry reg, boolean listening) {
+        System.out.println("RPCS Daemon (stdin mode)");
+        System.out.println(listening
+                ? "  [MagicServer] Listening for packets on UDP port " + Config.port()
+                : "  [MagicServer] Not running (RPCS_SECRET missing)");
+        System.out.println("\nCommands:");
+        System.out.print(reg.helpText());
         System.out.println("""
-                RPCS Daemon (stdin mode)
-                Commands:
-                  reboot    - systemctl reboot
-                  poweroff  - systemctl poweroff
-                  suspend   - systemctl suspend
-                  help      - show this help
-                  exit      - stop daemon
+                Other:
+                  help            - show this help
+                  clear           - clear screen
+                  logs [N]        - show last N log lines (default 50)
+                  logmode on|off  - auto-show last 20 lines after each command
+                  exit            - stop daemon
+
                 One-shot usage:
-                  java -jar rpcs-daemon-0.1.0.jar --suspend
+                  rpcs --suspend
+                  rpcs --reboot
+                  rpcs --poweroff
                 """);
     }
 
-    private static void printHelp() { printBanner(); }
-
-    private static boolean isLinux() {
-        String os = System.getProperty("os.name", "").toLowerCase(Locale.ROOT);
-        return os.contains("linux");
+    private static void printUsageAndExit(CommandRegistry reg, int code) {
+        System.out.println("Usage:\n  rpcs --<command> [args...]\nCommands:");
+        System.out.print(reg.helpText());
+        System.exit(code);
     }
 
-    private static boolean commandExists(String name) {
-        // quick PATH lookup
-        String path = System.getenv("PATH");
-        if (path == null) return false;
-        for (String dir : path.split(":")) {
-            Path p = Path.of(dir, name);
-            if (Files.isExecutable(p)) return true;
+    private static void printTail(int n) {
+        var lines = Log.tail(n);
+        if (lines.isEmpty()) {
+            System.out.println("(no logs yet)");
+            return;
         }
-        return false;
+        System.out.println("---- logs (last " + lines.size() + ") ----");
+        for (String s : lines) System.out.println(s);
+        System.out.println("---- end ----");
     }
 
-    // --- Simple process runner with clear errors
-    static class CommandRunner {
-        static void run(String... cmd) throws IOException, InterruptedException, CommandFailedException {
-            ProcessBuilder pb = new ProcessBuilder(cmd);
-            pb.redirectOutput(ProcessBuilder.Redirect.INHERIT);
-            pb.redirectError(ProcessBuilder.Redirect.INHERIT);
-            Process p = pb.start();
-            int code = p.waitFor();
-            if (code != 0) {
-                throw new CommandFailedException("Command failed (exit " + code + "): " + String.join(" ", cmd), code);
+    private static void clearScreen() {
+        try {
+            if (System.getProperty("os.name").toLowerCase().contains("win")) {
+                new ProcessBuilder("cmd", "/c", "cls").inheritIO().start().waitFor();
+            } else {
+                new ProcessBuilder("clear").inheritIO().start().waitFor();
             }
-        }
-    }
-
-    static class CommandFailedException extends Exception {
-        final int exitCode;
-        CommandFailedException(String msg, int exitCode) {
-            super(msg);
-            this.exitCode = exitCode;
+        } catch (Exception e) {
+            System.out.println("\n".repeat(50));
         }
     }
 }
